@@ -140,6 +140,13 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
 .day.tdy{outline:1px solid var(--accent)}
 .day.sel{background:var(--accent);color:var(--accent-ink);font-weight:700}
 .calfoot{display:flex;justify-content:space-between;margin-top:8px}
+.pill.sched{background:var(--line);color:var(--muted)}
+.task.sched{border-left-color:var(--muted);opacity:.85}
+.hint{font-size:12px;color:var(--muted);margin-top:4px}
+.rep{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line)}
+.rep:first-of-type{border-top:0}
+.rep b{display:block}
+.rep small{color:var(--muted);font-size:13px}
 .gbtn{display:flex;justify-content:center;min-height:44px;margin:6px 0 4px}
 </style>
 </head>
@@ -189,7 +196,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
 
 <script>
 /* ======================= CONFIG ======================= */
-var BUILD = 'build 2026-09-25.5';
+var BUILD = 'build 2026-09-25.6';
 
 // OAuth Client ID from Google Cloud Console. Must match CLIENT_ID in Code.gs.
 var CLIENT_ID = '1059378920553-58nqgf0vv0ukn8rvpcefebhbs020tlsn.apps.googleusercontent.com';
@@ -202,7 +209,9 @@ var me = null;             // { name, role, email } from Google sign-in
 var idt = '';              // Google ID token (about 1 hour); kept for this tab only
 var state = null;          // last load_ reply
 var ui = { open: {}, filterOwner: '', filterStatus: '', stale: false, draft: emptyDraft() };
-function emptyDraft() { return { owner: '', task: '', section: '', due: '' }; }
+function emptyDraft() { return { owner: '', task: '', section: '', due: '', start: '', repeat: '', ends: '' }; }
+var REPEATS = { '': 'Does not repeat', weekdays: 'Every weekday (Mon–Fri)', weekly: 'Every week', biweekly: 'Every 2 weeks', monthly: 'Every month' };
+function isSched(t) { return !!(t.start && t.start > ((state && state.today) || today())); }
 
 /* ======================= SERVER CALLS ======================= */
 // Plain fetch with NO cookies (credentials: 'omit'). Apps Script allows this (Access-Control-Allow-Origin: *).
@@ -257,6 +266,7 @@ function byDueThenSort(a, b) {
   return (a.sort || 0) - (b.sort || 0);
 }
 function counts(tasks) {
+  tasks = tasks.filter(function (t) { return !isSched(t); });
   var c = { open: 0, done: 0, total: tasks.length };
   tasks.forEach(function (t) { c[t.status === 'done' ? 'done' : 'open']++; });
   return c;
@@ -355,7 +365,8 @@ $('refreshBtn').onclick = function () { refresh(true); };
 function setState(d) {
   state = { me: d.me, tasks: d.tasks || [], notes: d.notes || [],
             students: d.students || (state && state.students) || [],
-            missingEmail: d.missingEmail || (state && state.missingEmail) || [], stamp: d.stamp };
+            missingEmail: d.missingEmail || (state && state.missingEmail) || [],
+            repeats: d.repeats || (state && state.repeats) || [], today: d.today || today(), stamp: d.stamp };
   ui.stale = false;
   render();
 }
@@ -390,18 +401,20 @@ function render() {
 
 function taskHTML(t, showOwner) {
   var late = t.status !== 'done' && t.due && t.due < today();
+  var sched = isSched(t);
   var o = ui.open[t.id] || '';
-  var h = '<article class="task ' + t.status + '" data-id="' + esc(t.id) + '">' +
-    '<div class="top"><div class="txt">' + esc(t.task) + '</div><span class="pill ' + t.status + '">' + LABEL[t.status] + '</span></div>' +
+  var h = '<article class="task ' + (sched ? 'sched' : t.status) + '" data-id="' + esc(t.id) + '">' +
+    '<div class="top"><div class="txt">' + esc(t.task) + '</div>' + (sched ? '<span class="pill sched">Scheduled</span>' : '<span class="pill ' + t.status + '">' + LABEL[t.status] + '</span>') + '</div>' +
     '<div class="meta">' +
       (showOwner ? '<span><b>' + esc(t.owner) + '</b></span>' : '') +
       (t.section && t.section !== 'General' ? '<span class="tag">' + esc(t.section) + '</span>' : '') +
+      (sched ? '<span>Shows ' + esc(prettyDue(t.start)) + '</span>' : '') +
       (t.due ? '<span class="' + (late ? 'late' : '') + '">' + (late ? 'Overdue · ' : 'Due ') + esc(prettyDue(t.due)) + '</span>' : '') +
       (t.updated_by ? '<span>Updated by ' + esc(t.updated_by) + (t.updated_at ? ', ' + esc(t.updated_at) : '') + '</span>' : '') +
     '</div>' +
-    '<div class="actions">' +
+    (sched ? '' : '<div class="actions">' +
       '<button class="btn small" data-act="panel-status" type="button">' + (t.status === 'done' ? 'Reopen' : 'Start') + '</button>' +
-    '</div>';
+    '</div>');
   if (o === 'status') {
     h += '<div class="panel"><div class="seg">' +
       ['open', 'done'].map(function (s) {
@@ -414,12 +427,18 @@ function taskHTML(t, showOwner) {
 }
 
 function listHTML(tasks, showOwner) {
+  var later = tasks.filter(isSched).sort(function (a, b) { return a.start < b.start ? -1 : a.start > b.start ? 1 : byDueThenSort(a, b); });
+  tasks = tasks.filter(function (t) { return !isSched(t); });
   var active = tasks.filter(function (t) { return t.status !== 'done'; }).sort(byDueThenSort);
   var done = tasks.filter(function (t) { return t.status === 'done'; }).sort(byDueThenSort);
   var h = active.map(function (t) { return taskHTML(t, showOwner); }).join('');
   if (done.length) {
     h += '<details class="done-group"' + (active.length ? '' : ' open') + '><summary>Completed (' + done.length + ')</summary>' +
       done.map(function (t) { return taskHTML(t, showOwner); }).join('') + '</details>';
+  }
+  if (later.length) {
+    h += '<details class="done-group"><summary>Scheduled (' + later.length + ')</summary>' +
+      later.map(function (t) { return taskHTML(t, showOwner); }).join('') + '</details>';
   }
   return h;
 }
@@ -438,21 +457,41 @@ function teacherHTML() {
   state.tasks.forEach(function (t) { if (t.owner && students.indexOf(t.owner) < 0) students.push(t.owner); });
   var h = '<div class="tools">';
 
+  var d = ui.draft;
   h += '<div class="box"><h3>Add a task</h3><form id="addForm" autocomplete="off">' +
     '<div class="grid2">' +
       '<div><label class="f" for="addOwner">For</label><select class="inp" id="addOwner">' +
-        '<option value="">Choose a student</option><option value="__ALL__"' + (ui.draft.owner === '__ALL__' ? ' selected' : '') + '>All students (' + state.students.length + ')</option>' +
-        state.students.map(function (n) { return '<option' + (ui.draft.owner === n ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></div>' +
-      '<div><label class="f" for="addDueBtn">Due (optional)</label><div class="datewrap">' +
-        '<button type="button" class="inp datebtn" id="addDueBtn" aria-haspopup="dialog">' +
-          '<span id="addDueText" class="' + (ui.draft.due ? '' : 'ph') + '">' + (ui.draft.due ? esc(prettyDue(ui.draft.due)) : 'Pick a date') + '</span>' +
-          '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' +
-        '</button><input type="hidden" id="addDue" value="' + esc(ui.draft.due) + '"><div class="cal hidden" id="cal" role="dialog" aria-label="Choose a due date"></div></div></div>' +
+        '<option value="">Choose a student</option><option value="__ALL__"' + (d.owner === '__ALL__' ? ' selected' : '') + '>All students (' + state.students.length + ')</option>' +
+        state.students.map(function (n) { return '<option' + (d.owner === n ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></div>' +
+      '<div><label class="f" for="addSection">Category (optional)</label><input class="inp" id="addSection" maxlength="40" placeholder="e.g., Work site, Paperwork" value="' + esc(d.section) + '"></div>' +
     '</div>' +
-    '<label class="f" for="addTask">Task</label><input class="inp" id="addTask" maxlength="300" placeholder="e.g., Turn in timesheet" value="' + esc(ui.draft.task) + '">' +
-    '<label class="f" for="addSection">Category (optional)</label><input class="inp" id="addSection" maxlength="40" placeholder="e.g., Work site, Class, Paperwork" value="' + esc(ui.draft.section) + '">' +
-    '<div class="actions"><button class="btn primary" type="submit" id="addBtn">Add task</button></div>' +
+    '<label class="f" for="addTask">Task</label><input class="inp" id="addTask" maxlength="300" placeholder="e.g., Turn in timesheet" value="' + esc(d.task) + '">' +
+    '<div class="grid2">' +
+      dateField('start', 'Show starting', 'Today', 'Today') +
+      dateField('due', 'Due (optional)', 'Pick a date', 'No due date') +
+    '</div>' +
+    '<div class="grid2">' +
+      '<div><label class="f" for="addRepeat">Repeat</label><select class="inp" id="addRepeat">' +
+        Object.keys(REPEATS).map(function (k) { return '<option value="' + k + '"' + (d.repeat === k ? ' selected' : '') + '>' + REPEATS[k] + '</option>'; }).join('') +
+      '</select></div>' +
+      (d.repeat ? dateField('ends', 'Ends (optional)', 'Never', 'Never') : '<div></div>') +
+    '</div>' +
+    '<div class="hint">' + (d.repeat
+      ? 'A new copy shows on each repeat day' + (d.due ? ', due ' + dayGap(d.start || today(), d.due) + ' after it shows' : '') + '. Students see only the copies that have shown.'
+      : 'Students won&#39;t see this task until its show date.') + '</div>' +
+    '<div class="actions"><button class="btn primary" type="submit" id="addBtn">' + (d.repeat ? 'Add repeating task' : 'Add task') + '</button></div>' +
     '</form></div>';
+
+  if (state.repeats && state.repeats.length) {
+    h += '<div class="box"><h3>Repeating tasks</h3>' + state.repeats.map(function (r) {
+      var who = r.owner === '__ALL__' ? 'All students' : r.owner;
+      return '<div class="rep"><div><b>' + esc(r.task) + '</b><small>' + esc(who) + ' · ' + esc(r.label) +
+        (r.dueAfter !== '' && r.dueAfter != null ? ' · due ' + (r.dueAfter === 0 ? 'same day' : r.dueAfter + ' day' + (r.dueAfter === 1 ? '' : 's') + ' later') : '') +
+        (r.next ? ' · next shows ' + esc(prettyDue(r.next)) : ' · no more dates') +
+        (r.ends ? ' · ends ' + esc(prettyDue(r.ends)) : '') + '</small></div>' +
+        '<button class="btn small" type="button" data-stop="' + esc(r.id) + '" data-name="' + esc(r.task) + '">Stop</button></div>';
+    }).join('') + '</div>';
+  }
 
   h += '<div class="box"><h3>Students</h3>';
   if (state.missingEmail && state.missingEmail.length) h += '<div class="banner">No email on the Students tab, so these students cannot sign in: ' + esc(state.missingEmail.join(', ')) + '</div>';
@@ -521,7 +560,11 @@ function wire() {
     $('addOwner').onchange = function () { ui.draft.owner = this.value; };
     $('addTask').oninput = function () { ui.draft.task = this.value; };
     $('addSection').oninput = function () { ui.draft.section = this.value; };
-    $('addDueBtn').onclick = function (e) { e.stopPropagation(); toggleCal(); };
+    ['start', 'due', 'ends'].forEach(function (k) {
+      var b = $('db_' + k); if (b) b.onclick = function (e) { e.stopPropagation(); toggleCal(k); };
+    });
+    $('addRepeat').onchange = function () { ui.draft.repeat = this.value; if (!this.value) ui.draft.ends = ''; render(); };
+    document.querySelectorAll('[data-stop]').forEach(function (b) { b.onclick = function () { stopRepeat(b.getAttribute('data-stop'), b.getAttribute('data-name')); }; });
   }
 }
 
@@ -550,18 +593,27 @@ function saveStatus(id, next) {
 
 function addTask(e) {
   e.preventDefault();
-  var owner = $('addOwner').value, task = $('addTask').value.trim();
+  var d = ui.draft, owner = $('addOwner').value, task = $('addTask').value.trim();
   if (!owner) { toast('Choose a student.', true); return; }
   if (!task) { toast('Type the task.', true); return; }
-  var params = { action: 'add', owner: owner, task: task, due: $('addDue').value, section: $('addSection').value.trim() };
-  var go = owner === '__ALL__' ? confirmBox('Add "' + task + '" for all ' + state.students.length + ' students?') : Promise.resolve(true);
+  var start = d.start || today();
+  if (d.due && d.due < start) { toast('The due date is before the show date.', true); return; }
+  if (d.repeat && d.ends && d.ends < start) { toast('The end date is before the first show date.', true); return; }
+  var params = { action: 'add', owner: owner, task: task, due: d.due, start: d.start, repeat: d.repeat, ends: d.ends,
+                 section: $('addSection').value.trim() };
+  var whoTxt = owner === '__ALL__' ? 'all ' + state.students.length + ' students' : owner;
+  var msg = d.repeat
+    ? 'Repeat "' + task + '" for ' + whoTxt + ', ' + REPEATS[d.repeat].toLowerCase() + ', starting ' + prettyDue(start) + (d.ends ? ' until ' + prettyDue(d.ends) : '') + '?'
+    : (owner === '__ALL__' || start > today() ? 'Add "' + task + '" for ' + whoTxt + (start > today() ? ', showing ' + prettyDue(start) : '') + '?' : '');
+  var go = msg ? confirmBox(msg) : Promise.resolve(true);
   go.then(function (yes) {
     if (!yes) return;
     $('addBtn').disabled = true; $('addBtn').textContent = 'Adding…';
-    call(params).then(function (d) {
+    call(params).then(function (r) {
       ui.draft = emptyDraft();
-      setState(d.state, false);
-      toast('Added ' + d.added.length + ' task' + (d.added.length === 1 ? '' : 's'));
+      setState(r.state, false);
+      var n = (r.added || []).length;
+      toast(r.repeatId ? 'Repeating task set' + (n ? ' (' + n + ' shown today)' : '') : start > today() ? 'Scheduled for ' + prettyDue(start) : 'Added ' + n + ' task' + (n === 1 ? '' : 's'));
     }).catch(function (err) {
       toast('Nothing was saved. ' + err.message.replace(/^SIGNIN:\s*/, ''), true);
       if (/^SIGNIN:/.test(err.message)) askSignIn(err.message.replace(/^SIGNIN:\s*/, ''));
@@ -570,58 +622,83 @@ function addTask(e) {
   });
 }
 
+function stopRepeat(id, name) {
+  confirmBox('Stop repeating "' + name + '"? Copies already shown stay on students’ lists.').then(function (yes) {
+    if (!yes) return;
+    call({ action: 'stopRepeat', id: id }).then(function (r) { setState(r.state, false); toast('Stopped'); })
+      .catch(function (err) { toast('Nothing was saved. ' + err.message.replace(/^SIGNIN:\s*/, ''), true); });
+  });
+}
+
+function dayGap(a, b) {
+  var n = Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
+  return n === 0 ? '0 days (same day)' : n + ' day' + (n === 1 ? '' : 's');
+}
+
+function dateField(key, label, emptyText, clearText) {
+  var v = ui.draft[key] || '';
+  return '<div><label class="f" for="db_' + key + '">' + label + '</label><div class="datewrap">' +
+    '<button type="button" class="inp datebtn" id="db_' + key + '" data-clear="' + esc(clearText) + '" data-empty="' + esc(emptyText) + '">' +
+      '<span id="dt_' + key + '" class="' + (v ? '' : 'ph') + '">' + (v ? esc(prettyDue(v)) : esc(emptyText)) + '</span>' +
+      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' +
+    '</button><div class="cal hidden" id="cal_' + key + '" role="dialog" aria-label="' + esc(label) + '"></div></div></div>';
+}
+
 /* ======================= DATE PICKER ======================= */
 // Custom popup: the browser's own picker can't be opened from inside the Apps Script frame.
 var calView = null;   // { y, m } month being shown
 var MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function ymd(y, m, d) { return y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0'); }
 
-function toggleCal() {
-  var c = $('cal');
-  if (!c.classList.contains('hidden')) { closeCal(); return; }
-  var v = $('addDue').value, m = /^(\d{4})-(\d{2})-\d{2}$/.exec(v), now = new Date();
+var calKey = '';
+function toggleCal(key) {
+  var c = $('cal_' + key), wasOpen = c && !c.classList.contains('hidden');
+  closeCal();
+  if (!c || wasOpen) return;
+  calKey = key;
+  var v = ui.draft[key] || (key === 'due' && ui.draft.start) || '', m = /^(\d{4})-(\d{2})-\d{2}$/.exec(v), now = new Date();
   calView = m ? { y: +m[1], m: +m[2] - 1 } : { y: now.getFullYear(), m: now.getMonth() };
   drawCal();
   c.classList.remove('hidden');
 }
-function closeCal() { var c = $('cal'); if (c) c.classList.add('hidden'); }
+function closeCal() { document.querySelectorAll('.cal').forEach(function (c) { c.classList.add('hidden'); }); }
 
 function drawCal() {
-  var y = calView.y, m = calView.m, sel = $('addDue').value, tdy = today();
+  var y = calView.y, m = calView.m, sel = ui.draft[calKey] || '', tdy = today();
+  var min = calKey === 'start' ? tdy : (ui.draft.start || tdy);
   var first = new Date(y, m, 1).getDay(), days = new Date(y, m + 1, 0).getDate();
+  var btn = $('db_' + calKey);
   var h = '<div class="calhead"><button type="button" class="calnav" data-nav="-1" aria-label="Previous month">‹</button>' +
           '<b>' + MONTHS[m] + ' ' + y + '</b>' +
           '<button type="button" class="calnav" data-nav="1" aria-label="Next month">›</button></div><div class="calgrid">' +
           ['S','M','T','W','T','F','S'].map(function (d) { return '<span class="dow">' + d + '</span>'; }).join('');
   for (var i = 0; i < first; i++) h += '<span></span>';
   for (var d = 1; d <= days; d++) {
-    var v = ymd(y, m, d);
-    h += '<button type="button" class="day' + (v === sel ? ' sel' : '') + (v === tdy ? ' tdy' : '') + '" data-day="' + v + '">' + d + '</button>';
+    var v = ymd(y, m, d), off = v < min;
+    h += '<button type="button" class="day' + (v === sel ? ' sel' : '') + (v === tdy ? ' tdy' : '') + '" data-day="' + v + '"' + (off ? ' disabled style="opacity:.3"' : '') + '>' + d + '</button>';
   }
   h += '</div><div class="calfoot"><button type="button" class="btn small" data-pick="today">Today</button>' +
-       '<button type="button" class="btn small" data-pick="clear">No due date</button></div>';
-  var c = $('cal'); c.innerHTML = h;
+       '<button type="button" class="btn small" data-pick="clear">' + esc(btn ? btn.getAttribute('data-clear') : 'Clear') + '</button></div>';
+  var c = $('cal_' + calKey); c.innerHTML = h;
   c.onclick = function (e) {
     e.stopPropagation();
-    var t = e.target.closest('button'); if (!t) return;
+    var t = e.target.closest('button'); if (!t || t.disabled) return;
     if (t.dataset.nav) {
       calView.m += +t.dataset.nav;
       if (calView.m < 0) { calView.m = 11; calView.y--; }
       if (calView.m > 11) { calView.m = 0; calView.y++; }
       drawCal();
-    } else if (t.dataset.day) setDue(t.dataset.day);
-    else if (t.dataset.pick === 'today') setDue(today());
-    else if (t.dataset.pick === 'clear') setDue('');
+    } else if (t.dataset.day) setDate(calKey, t.dataset.day);
+    else if (t.dataset.pick === 'today') setDate(calKey, today());
+    else if (t.dataset.pick === 'clear') setDate(calKey, '');
   };
 }
 
-function setDue(v) {
-  ui.draft.due = v;
-  $('addDue').value = v;
-  var txt = $('addDueText');
-  txt.textContent = v ? prettyDue(v) : 'Pick a date';
-  txt.className = v ? '' : 'ph';
+function setDate(key, v) {
+  if (key === 'start' && v === today()) v = '';          // "today" is the default; store blank
+  ui.draft[key] = v;
   closeCal();
+  render();                                              // refreshes labels and the repeat hint
 }
 document.addEventListener('click', function (e) { if (!e.target.closest || !e.target.closest('.datewrap')) closeCal(); });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeCal(); });
