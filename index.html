@@ -150,7 +150,6 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
     <div class="who hidden" id="who">
       <span><span class="hi">Hi, </span><b id="whoName"></b></span>
       <button class="btn small" id="refreshBtn" type="button">Refresh</button>
-      <button class="btn small hidden" id="lockBtn" type="button">Lock</button>
       <button class="btn small" id="logoutBtn" type="button">Log out</button>
     </div>
   </div>
@@ -160,15 +159,9 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
   <div class="wrap">
     <section id="signin">
       <div class="signcard" id="gate">
-        <span class="flag">Start here</span>
-        <h1>Your checklist</h1>
+        <h1>RWP Dashboard</h1>
         <p id="gateMsg">Sign in with your school Google account.</p>
         <div id="gbtn" class="gbtn"></div>
-        <form id="passForm" class="hidden" autocomplete="off">
-          <label class="f" for="passIn">Teacher passcode</label>
-          <input class="inp" id="passIn" type="password" inputmode="numeric" autocomplete="off" maxlength="12">
-          <button class="btn primary" style="width:100%;margin-top:14px" type="submit" id="signBtn">Open teacher view</button>
-        </form>
         <button class="btn hidden" style="width:100%;margin-top:12px" type="button" id="retryBtn">Try again</button>
         <div class="err" id="signErr" role="alert"></div>
       </div>
@@ -196,7 +189,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
 
 <script>
 /* ======================= CONFIG ======================= */
-var BUILD = 'build 2026-09-25.2';
+var BUILD = 'build 2026-09-25.5';
 
 // OAuth Client ID from Google Cloud Console. Must match CLIENT_ID in Code.gs.
 var CLIENT_ID = '1059378920553-58nqgf0vv0ukn8rvpcefebhbs020tlsn.apps.googleusercontent.com';
@@ -206,7 +199,6 @@ var EXEC_URL = 'https://script.google.com/macros/s/AKfycby7akb8-ue3WiYNBuIkIDaZT
 /* ======================= STATE ======================= */
 var LABEL = { open: 'Not Started', done: 'Completed' };
 var me = null;             // { name, role, email } from Google sign-in
-var teacherPass = '';      // held in memory only; Lock or reload clears it
 var idt = '';              // Google ID token (about 1 hour); kept for this tab only
 var state = null;          // last load_ reply
 var ui = { open: {}, filterOwner: '', filterStatus: '', stale: false, draft: emptyDraft() };
@@ -218,7 +210,6 @@ function emptyDraft() { return { owner: '', task: '', section: '', due: '' }; }
 // Identity comes only from the Google ID token, which the server checks with Google.
 function call(params) {
   var p = Object.assign({ idt: idt }, params);
-  if (teacherPass) p.pass = teacherPass;
   var q = new URLSearchParams(p); q.set('_', Date.now());
   var ctl = window.AbortController ? new AbortController() : null;
   var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 25000);
@@ -276,16 +267,14 @@ function barHTML(c) {
 }
 
 /* ======================= SIGN IN ======================= */
-function showGate(msg, err, showPass, showRetry) {
+function showGate(msg, err, showRetry) {
   $('signin').classList.remove('hidden');
   $('board').classList.add('hidden');
   $('who').classList.add('hidden');
   $('gateMsg').textContent = msg || '';
   $('signErr').textContent = err || '';
-  $('passForm').classList.toggle('hidden', !showPass);
   $('retryBtn').classList.toggle('hidden', !showRetry);
-  $('gbtn').classList.toggle('hidden', !!showPass);
-  if (showPass) { $('passIn').value = ''; setTimeout(function () { $('passIn').focus(); }, 50); }
+  $('gbtn').classList.remove('hidden');
 }
 
 function tokenExp(t) {   // seconds since epoch, or 0
@@ -295,6 +284,10 @@ function tokenExp(t) {   // seconds since epoch, or 0
   } catch (e) { return 0; }
 }
 function saveToken(t) { idt = t; try { sessionStorage.setItem('rwp.idt', t); } catch (e) {} }
+// After Log out, stop automatic sign-in on this device until someone taps the button.
+function loggedOut() { try { return localStorage.getItem('rwp.loggedOut') === '1'; } catch (e) { return false; } }
+function setLoggedOut(v) { try { if (v) localStorage.setItem('rwp.loggedOut', '1'); else localStorage.removeItem('rwp.loggedOut'); } catch (e) {} }
+var SWITCH_HINT = 'To use a different account, tap Sign in with Google, then Use another account.';
 function clearToken() { idt = ''; try { sessionStorage.removeItem('rwp.idt'); } catch (e) {} }
 
 var gisReady = false;
@@ -302,8 +295,8 @@ function initGoogle(tries) {
   if (window.google && google.accounts && google.accounts.id) {
     google.accounts.id.initialize({
       client_id: CLIENT_ID,
-      callback: function (resp) { saveToken(resp.credential); whoami(); },
-      auto_select: true,
+      callback: function (resp) { setLoggedOut(false); saveToken(resp.credential); whoami(); },
+      auto_select: !loggedOut(),
       hd: 'csdeagles.net',
       itp_support: true,
       use_fedcm_for_prompt: true
@@ -312,14 +305,14 @@ function initGoogle(tries) {
     gisReady = true;
     return;
   }
-  if ((tries || 0) > 100) { showGate('', 'Google sign-in did not load. Check your connection and reload.', false, true); return; }
+  if ((tries || 0) > 100) { showGate('', 'Google sign-in did not load. Check your connection and reload.', true); return; }
   setTimeout(function () { initGoogle((tries || 0) + 1); }, 100);
 }
 
 function askSignIn(msg) {
-  clearToken(); teacherPass = ''; state = null;
+  clearToken(); state = null;
   showGate(msg || 'Sign in with your school Google account.');
-  if (gisReady) { try { google.accounts.id.prompt(); } catch (e) {} }
+  if (gisReady && !loggedOut()) { try { google.accounts.id.prompt(); } catch (e) {} }
 }
 
 function whoami() {
@@ -327,8 +320,7 @@ function whoami() {
   $('gbtn').classList.add('hidden');
   call({ action: 'whoami' }).then(function (d) {
     me = d.me;
-    if (d.needPass) showGate('Signed in as ' + me.email + '. Enter your teacher passcode.', '', true);
-    else return refresh(false);
+    return refresh(false);
   }).catch(function (err) {
     if (/^SIGNIN:/.test(err.message)) { askSignIn(err.message.replace(/^SIGNIN:\s*/, '')); return; }
     clearToken();
@@ -342,22 +334,9 @@ function start() {
   initGoogle(0);
   var t = ''; try { t = sessionStorage.getItem('rwp.idt') || ''; } catch (e) {}
   if (t && tokenExp(t) * 1000 > Date.now() + 60000) { saveToken(t); whoami(); }
+  else if (loggedOut()) { showGate('You are logged out. ' + SWITCH_HINT); }
   else { showGate('Sign in with your school Google account.'); var w = setInterval(function () { if (gisReady) { clearInterval(w); try { google.accounts.id.prompt(); } catch (e) {} } }, 150); }
 }
-
-$('passForm').addEventListener('submit', function (e) {
-  e.preventDefault();
-  var pass = $('passIn').value.trim();
-  if (!pass) { $('signErr').textContent = 'Type your passcode.'; return; }
-  $('signBtn').disabled = true; $('signErr').textContent = '';
-  teacherPass = pass;
-  call({ action: 'load' }).then(function (d) {
-    setState(d);
-  }).catch(function (err) {
-    teacherPass = '';
-    $('signErr').textContent = err.message.replace(/^SIGNIN:\s*/, '');
-  }).finally(function () { $('signBtn').disabled = false; });
-});
 
 $('retryBtn').onclick = function () { location.reload(); };
 // Log out of the checklist only. Google stays signed in on this browser, but
@@ -365,12 +344,10 @@ $('retryBtn').onclick = function () { location.reload(); };
 $('logoutBtn').onclick = function () {
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
   ui = { open: {}, filterOwner: '', filterStatus: '', stale: false, draft: emptyDraft() };
-  clearToken(); teacherPass = ''; state = null; me = null;
-  showGate('You are logged out.');
-};
-$('lockBtn').onclick = function () {
-  teacherPass = ''; state = null; ui = { open: {}, filterOwner: '', filterStatus: '', stale: false, draft: emptyDraft() };
-  whoami();
+  clearToken(); state = null; me = null;
+  setLoggedOut(true);
+  try { google.accounts.id.cancel(); } catch (e) {}
+  showGate('You are logged out. ' + SWITCH_HINT);
 };
 $('refreshBtn').onclick = function () { refresh(true); };
 
@@ -380,7 +357,6 @@ function setState(d) {
             students: d.students || (state && state.students) || [],
             missingEmail: d.missingEmail || (state && state.missingEmail) || [], stamp: d.stamp };
   ui.stale = false;
-  $('lockBtn').classList.toggle('hidden', d.me.role !== 'teacher');
   render();
 }
 
@@ -390,8 +366,8 @@ function refresh(announce) {
     if (announce) toast('Up to date');
   }).catch(function (err) {
     if (/^SIGNIN:/.test(err.message)) { askSignIn(err.message.replace(/^SIGNIN:\s*/, '')); return; }
-    if (/passcode|not on the RWP list/i.test(err.message)) { teacherPass = ''; state = null; whoami(); return; }
-    if (!state) { showGate('', err.message, false, true); return; }
+    if (/not on the RWP list/i.test(err.message)) { state = null; whoami(); return; }
+    if (!state) { showGate('', err.message, true); return; }
     ui.stale = true; render();
     toast('Could not refresh: ' + err.message, true);
   });
