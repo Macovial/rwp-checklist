@@ -196,7 +196,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:8px;padding-top:10px
 
 <script>
 /* ======================= CONFIG ======================= */
-var BUILD = 'build 2026-09-25.1';
+var BUILD = 'build 2026-09-25.2';
 
 // OAuth Client ID from Google Cloud Console. Must match CLIENT_ID in Code.gs.
 var CLIENT_ID = '1059378920553-58nqgf0vv0ukn8rvpcefebhbs020tlsn.apps.googleusercontent.com';
@@ -212,28 +212,28 @@ var state = null;          // last load_ reply
 var ui = { open: {}, filterOwner: '', filterStatus: '', stale: false, draft: emptyDraft() };
 function emptyDraft() { return { owner: '', task: '', section: '', due: '' }; }
 
-/* ======================= SERVER CALLS (JSONP) ======================= */
-// The page and the script are on different sites, so fetch() can't read replies. Keep JSONP.
-// Every call carries the Google ID token; the server checks it with Google.
+/* ======================= SERVER CALLS ======================= */
+// Plain fetch with NO cookies (credentials: 'omit'). Apps Script allows this (Access-Control-Allow-Origin: *).
+// Sending no Google cookies keeps multi-account browsers from being rerouted to the wrong account.
+// Identity comes only from the Google ID token, which the server checks with Google.
 function call(params) {
   var p = Object.assign({ idt: idt }, params);
   if (teacherPass) p.pass = teacherPass;
-  return new Promise(function (resolve, reject) {
-    var cb = 'rwp_cb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
-    var s = document.createElement('script'), done = false;
-    var timer = setTimeout(function () { finish(); reject(new Error('No answer from the server. Check your connection.')); }, 25000);
-    function finish() { done = true; clearTimeout(timer); window[cb] = function () {}; s.remove(); }
-    window[cb] = function (d) {
-      if (done) return;
-      finish();
-      if (d && d.ok) resolve(d); else reject(new Error((d && d.error) || 'Unknown error'));
-    };
-    var q = new URLSearchParams(p);
-    q.set('callback', cb); q.set('_', Date.now());
-    s.src = EXEC_URL + '?' + q.toString();
-    s.onerror = function () { if (done) return; finish(); reject(new Error('Could not reach the server.')); };
-    document.head.appendChild(s);
-  });
+  var q = new URLSearchParams(p); q.set('_', Date.now());
+  var ctl = window.AbortController ? new AbortController() : null;
+  var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 25000);
+  return fetch(EXEC_URL + '?' + q.toString(), { method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'follow', signal: ctl ? ctl.signal : undefined })
+    .then(function (r) {
+      if (!r.ok) throw new Error('The server answered with an error (' + r.status + ').');
+      return r.json().catch(function () { throw new Error('The server sent an unexpected reply. Is the deployment set to Anyone?'); });
+    }, function (e) {
+      throw new Error(e && e.name === 'AbortError' ? 'No answer from the server. Check your connection.' : 'Could not reach the server.');
+    })
+    .then(function (d) {
+      if (d && d.ok) return d;
+      throw new Error((d && d.error) || 'Unknown error');
+    })
+    .finally(function () { clearTimeout(timer); });
 }
 
 /* ======================= HELPERS ======================= */
